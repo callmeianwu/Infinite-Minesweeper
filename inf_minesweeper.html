@@ -1,0 +1,698 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Infinite Minesweeper — Chunk-Loaded</title>
+  <style>
+    :root {
+      --bg: #0f1220;
+      --panel: #121734;
+      --ink: #e8ebff;
+      --muted: #acb3ff;
+      --accent: #7aa2ff;
+      --accent-2: #69e0b9;
+      --danger: #ff6b6b;
+      --grid: #232848;
+      --flag: #ffaf38;
+      --glass: rgba(16,18,35,.55);
+      --glass-brd: #222849;
+      --ring: rgba(122,162,255,.35);
+    }
+
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      background:
+        radial-gradient(1100px 800px at 20% -10%, #1c2350 0%, rgba(15,18,32,0) 40%),
+        radial-gradient(900px 600px at 110% 10%, rgba(38,76,255,.08) 0%, rgba(15,18,32,0) 55%),
+        linear-gradient(180deg, #0f1220 0%, #0b0e1b 100%);
+      color: var(--ink);
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+      overflow: hidden;
+    }
+
+    #hud {
+      position: fixed; inset: 12px auto auto 12px; z-index: 30;
+      display: inline-flex; gap: 10px; align-items: center; flex-wrap: wrap;
+      padding: 8px 10px; border-radius: 14px;
+      background: var(--glass); backdrop-filter: blur(8px) saturate(1.15);
+      border: 1px solid var(--glass-brd);
+      box-shadow: 0 10px 40px rgba(0,0,0,0.35), inset 0 0 0 1px rgba(255,255,255,0.02);
+      font-size: 12px;
+    }
+
+    #hud button{
+      background: linear-gradient(180deg, #1a2150, #151b40);
+      color: var(--ink);
+      border: 1px solid #2a3270; border-radius: 12px;
+      padding: 6px 10px; font-size: 12px; cursor: pointer;
+      box-shadow: 0 4px 16px rgba(0,0,0,.25);
+      transition: transform .08s ease, box-shadow .2s ease, border-color .2s ease;
+    }
+    #hud button:hover{ transform: translateY(-1px); box-shadow: 0 8px 22px rgba(0,0,0,.35); border-color: #3a45a8; }
+    #hud button:active{ transform: translateY(0); box-shadow: 0 3px 10px rgba(0,0,0,.3); }
+    #hud .sep { width:1px; height:18px; background:#2a3162; margin:0 2px; }
+
+    #canvas { position:absolute; inset:0; display:block; cursor: crosshair; }
+    body.drag-mode #canvas { cursor: grab; }
+    body.drag-mode #canvas:active { cursor: grabbing; }
+
+    #overlay { 
+      position: fixed; inset: 0; display: none; place-items: center; z-index: 40;
+      background: rgba(0,0,0,0.55); color: white; text-align: center;
+      pointer-events: none;            /* 👈 NEW */
+    }
+    #overlay .card { 
+      background: linear-gradient(180deg, rgba(255,255,255,0.06), rgba(0,0,0,0.25));
+      border: 1px solid #2a2f5a; border-radius: 16px; padding: 18px 22px; min-width: 280px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.45);
+      pointer-events: auto;            /* 👈 NEW: buttons still work */
+    }
+    #overlay h2 { margin: 0 0 8px; font-size: 18px; color: var(--danger); }
+    #overlay p { margin: 0 0 12px; color: var(--muted); }
+    #overlay .actions { display:flex; gap:10px; justify-content:center; }
+
+    #flagCounter { color: var(--accent-2); font-weight: bold; }
+      
+    /* Rolling visual fog (top layer) */
+    #fogFx { position: fixed; inset: 0; pointer-events: none; z-index: 20; overflow: hidden; mix-blend-mode: screen; }
+    #fogFx::before, #fogFx::after, #fogFx > i {
+      content: ""; position: absolute; inset: -25%;
+      background:
+        radial-gradient(closest-side, rgba(255,255,255,0.06), rgba(255,255,255,0) 60%) 0 0 / 22% 22% repeat,
+        radial-gradient(closest-side, rgba(255,255,255,0.04), rgba(255,255,255,0) 60%) 50% 50% / 30% 30% repeat,
+        radial-gradient(closest-side, rgba(255,255,255,0.03), rgba(255,255,255,0) 60%) 25% 75% / 24% 24% repeat;
+      filter: blur(18px) saturate(1.05);
+      opacity: .22; will-change: transform, background-position;
+    }
+    #fogFx::before { animation: fogDrift1 80s linear infinite; }
+    #fogFx::after  { animation: fogDrift2 110s linear infinite; transform: rotate(10deg) scale(1.15); opacity:.17; }
+    #fogFx > i      { animation: fogDrift3 140s linear infinite; transform: rotate(-6deg) scale(1.08); opacity:.12; display:block; }
+
+    @keyframes fogDrift1 { from { transform: translate3d(0,0,0);} to { transform: translate3d(-9%, -6%, 0);} }
+    @keyframes fogDrift2 { from { transform: translate3d(0,0,0) rotate(10deg) scale(1.15);} to { transform: translate3d(11%, 8%, 0) rotate(10deg) scale(1.15);} }
+    @keyframes fogDrift3 { from { transform: translate3d(0,0,0) rotate(-6deg) scale(1.08);} to { transform: translate3d(-6%, 10%, 0) rotate(-6deg) scale(1.08);} }
+
+    .grain { position: fixed; inset:0; pointer-events:none; z-index: 15; mix-blend-mode: soft-light; opacity:.035; }
+    .grain::before { content:""; position:absolute; inset:-50%;
+      background: repeating-conic-gradient(from 0deg, rgba(255,255,255,.08) 0 1deg, rgba(0,0,0,.08) 1deg 2deg);
+      width:200%; height:200%; animation: grainShift 6s steps(10) infinite; filter: blur(.6px);
+    }
+    @keyframes grainShift { to { transform: translate3d(-2%, 1%, 0); } }
+
+    @media (prefers-reduced-motion: reduce){
+      #fogFx::before, #fogFx::after, #fogFx > i, .grain::before { animation: none !important; }
+    }
+    /* Controls */
+    #controlsOverlay{
+      position: fixed; inset:0; display:none; place-items:center; z-index: 45;
+      background: radial-gradient(1000px 700px at 50% 15%, rgba(124,199,255,0.10), rgba(0,0,0,0.55));
+      animation: overlayFade .18s ease forwards;
+    }
+    @keyframes overlayFade{
+      from{ backdrop-filter: blur(0px); opacity: 0; }
+      to{ backdrop-filter: blur(4px); opacity: 1; }
+    }
+
+    .controls-card{
+      width: min(720px, calc(100vw - 28px));
+      background: linear-gradient(180deg, rgba(21,24,42,0.85), rgba(12,15,28,0.85));
+      border: 1px solid var(--stroke);
+      border-radius: 18px;
+      box-shadow: 0 30px 100px rgba(0,0,0,0.5), var(--glow);
+      overflow: clip;
+      transform-origin: 50% 46%;
+      animation: cardIn .22s cubic-bezier(.2,.9,.2,1) forwards;
+    }
+    @keyframes cardIn{
+      from{ transform: translateY(8px) scale(0.98); opacity: 0; }
+      to{ transform: translateY(0) scale(1); opacity: 1; }
+    }
+
+    /* Header ribbon */
+    .controls-header{
+      position: relative;
+      padding: 16px 18px 14px 18px;
+      background:
+        radial-gradient(600px 100px at 50% 0%, rgba(124,199,255,0.16), transparent 70%),
+        linear-gradient(180deg, rgba(124,199,255,0.08), rgba(255,255,255,0.02));
+      border-bottom: 1px solid var(--stroke);
+    }
+    .controls-title{
+      display:flex; align-items:center; gap:10px;
+      font-weight: 700; letter-spacing:.3px; font-size: 18px;
+    }
+    .badge{
+      font-size: 12px; padding: 3px 8px; border-radius:999px;
+      background: rgba(166,255,204,0.12); color: var(--accent-2);
+      border: 1px solid rgba(166,255,204,0.28);
+    }
+
+    /* Content grid */
+    .controls-body{
+      padding: 14px 18px 16px 18px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px 16px;
+    }
+    @media (max-width: 640px){
+      .controls-body{ grid-template-columns: 1fr; }
+    }
+
+    /* Control item */
+    .ctrl{
+      background: var(--panel-strong);
+      border: 1px solid var(--stroke);
+      border-radius: 12px;
+      padding: 10px 12px;
+      display:flex; align-items:flex-start; gap:10px;
+      transition: transform .12s ease, box-shadow .18s ease;
+    }
+    .ctrl:hover{ transform: translateY(-1px); box-shadow: var(--glow); }
+    .ctrl-ico{
+      width:28px; height:28px; flex: 0 0 28px;
+      display:grid; place-items:center;
+      border-radius: 8px;
+      background: linear-gradient(180deg, rgba(124,199,255,0.17), rgba(124,199,255,0.08));
+      border: 1px solid var(--stroke);
+      filter: drop-shadow(0 2px 10px rgba(124,199,255,0.2));
+    }
+    .ctrl h4{
+      margin: 0 0 2px; font-size: 14px; letter-spacing:.2px;
+    }
+    .ctrl p{
+      margin:0; opacity:.9; font-size: 12.5px; line-height: 1.45;
+    }
+
+    /* Keycaps */
+    .kbd{
+      display:inline-flex; align-items:center; justify-content:center;
+      min-width: 22px; padding: 2px 6px;
+      margin: 0 2px;
+      font-size: 12px; font-weight: 700; letter-spacing:.2px;
+      color: #d7e9ff;
+      background: linear-gradient(180deg, #151b2f, #0e1426);
+      border: 1px solid rgba(124,199,255,0.35);
+      border-bottom-color: rgba(124,199,255,0.55);
+      border-radius: 8px;
+      box-shadow: 0 2px 0 rgba(124,199,255,0.35);
+    }
+    .kbd-wide{ padding: 2px 10px; }
+
+    /* Footer actions */
+    .controls-footer{
+      display:flex; align-items:center; justify-content:flex-end;
+      gap: 8px;
+      padding: 12px 16px 16px 16px;
+      border-top: 1px solid var(--stroke);
+      background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(124,199,255,0.06));
+    }
+    .btn{
+      background: #121830; color: var(--text);
+      border: 1px solid var(--stroke);
+      border-radius: 10px; padding: 8px 12px; font-size: 14px; cursor: pointer;
+      transition: transform .06s ease, box-shadow .15s ease, background .15s ease;
+    }
+    .btn:hover{ box-shadow: var(--glow); }
+    .btn:active{ transform: translateY(1px); }
+    .btn.primary{
+      background: linear-gradient(180deg, rgba(124,199,255,0.25), rgba(124,199,255,0.12));
+      color: white; border-color: rgba(124,199,255,0.6);
+    }
+
+    /* Subtle divider */
+    .hr{
+      height:1px; width:100%; background: linear-gradient(90deg, transparent, rgba(255,255,255,0.18), transparent);
+      margin: 8px 0;
+    }
+
+  </style>
+</head>
+<body>
+  <canvas id="canvas"></canvas>
+  <div id="fogFx"><i></i></div>
+  <div class="grain"></div>
+
+  <div id="hud">
+    <button id="newSeed" title="New seed">Seed</button>
+    <button id="resetView" title="Center view">Center</button>
+    <button id="clearReveals" title="Forget revealed/flagged">Forget</button>
+    <button id="controlsBtn" title="Show controls">Controls</button>
+    <div class="sep"></div>
+    <span>🚩 Flags: <span id="flagCounter">0</span></span>
+  </div>
+
+  <div id="overlay">
+    <div class="card">
+      <h2>💥 You hit a mine</h2>
+      <p>Start a new round to keep exploring.</p>
+      <div class="actions">
+        <button id="overlayNewRound">New round</button>
+        <button id="overlayCenter">Center</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="controlsOverlay" aria-hidden="true">
+    <div class="controls-card" role="dialog" aria-modal="true" aria-labelledby="ctrlTitle">
+      <div class="controls-header">
+        <div class="controls-title">
+          <span style="font-size:18px">🎮</span>
+          <div id="ctrlTitle">Controls</div>
+          <span class="badge">Quick reference</span>
+        </div>
+        <div style="opacity:.8; font-size:12.5px; margin-top:6px;">
+          Master navigation and clearing faster with shortcuts and pro tips.
+        </div>
+      </div>
+
+      <div class="controls-body">
+        <div class="ctrl">
+          <div class="ctrl-ico">🖱️</div>
+          <div>
+            <h4>Reveal Cell</h4>
+            <p><span class="kbd">L-Click</span> on a hidden tile to reveal it.</p>
+          </div>
+        </div>
+
+        <div class="ctrl">
+          <div class="ctrl-ico">🚩</div>
+          <div>
+            <h4>Place / Remove Flag</h4>
+            <p><span class="kbd">R-Click</span> on a hidden tile to toggle a flag.</p>
+          </div>
+        </div>
+
+        <div class="ctrl">
+          <div class="ctrl-ico">🔢</div>
+          <div>
+            <h4>Chord Reveal</h4>
+            <p>On a revealed number, <span class="kbd">L-Click</span> to auto-reveal neighbors when the number of adjacent flags matches.</p>
+          </div>
+        </div>
+
+        <div class="ctrl">
+          <div class="ctrl-ico">🔎</div>
+          <div>
+            <h4>Zoom</h4>
+            <p>Use <span class="kbd">Wheel</span> / trackpad to zoom in & out smoothly.</p>
+          </div>
+        </div>
+
+        <div class="ctrl">
+          <div class="ctrl-ico">🧭</div>
+          <div>
+            <h4>Pan / Drag</h4>
+            <p>Hold <span class="kbd kbd-wide">Space</span> or <span class="kbd">MMB</span> (middle button) and move the mouse.</p>
+          </div>
+        </div>
+
+        <div class="ctrl">
+          <div class="ctrl-ico">🌱</div>
+          <div>
+            <h4>Seed</h4>
+            <p>Click <span class="kbd">Seed</span> to generate a new world.</p>
+          </div>
+        </div>
+
+        <div class="ctrl">
+          <div class="ctrl-ico">🎯</div>
+          <div>
+            <h4>Center View</h4>
+            <p>Click <span class="kbd">Center</span> to re-focus on origin.</p>
+          </div>
+        </div>
+
+        <div class="ctrl">
+          <div class="ctrl-ico">🧹</div>
+          <div>
+            <h4>Forget</h4>
+            <p>Click <span class="kbd">Forget</span> to clear revealed and flagged tiles (seed persists).</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="hr"></div>
+
+      <div class="controls-footer">
+        <button id="controlsClose" class="btn">Close</button>
+        <button id="controlsGotIt" class="btn primary">Got it</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+
+  const controlsBtn = document.getElementById('controlsBtn');
+  const controlsOverlay = document.getElementById('controlsOverlay');
+  const controlsClose = document.getElementById('controlsClose');
+  const controlsGotIt = document.getElementById('controlsGotIt');
+
+  function openControls(){
+    controlsOverlay.style.display = 'grid';
+    controlsOverlay.setAttribute('aria-hidden','false');
+    // Focus the primary action for keyboard users
+    setTimeout(()=> controlsGotIt.focus(), 0);
+  }
+  function closeControls(){
+    // quick fade: allow animation to feel smooth
+    controlsOverlay.style.animation = 'overlayFade .14s reverse ease forwards';
+    setTimeout(()=>{
+      controlsOverlay.style.display = 'none';
+      controlsOverlay.style.animation = '';
+      controlsOverlay.setAttribute('aria-hidden','true');
+      controlsBtn.focus();
+    }, 120);
+  }
+  // Hi from Box Dude! :D
+  controlsBtn.addEventListener('click', openControls);
+  controlsClose.addEventListener('click', closeControls);
+  controlsGotIt.addEventListener('click', closeControls);
+
+  // Click outside to close
+  controlsOverlay.addEventListener('click', (e)=>{
+    if (e.target === controlsOverlay) closeControls();
+  });
+
+  // ESC to close
+  window.addEventListener('keydown', (e)=>{
+    if (e.key === 'Escape' && controlsOverlay.style.display !== 'none') {
+      e.preventDefault(); closeControls();
+    }
+  });
+
+  // Basic focus trap for accessibility (keeps Tab within the dialog)
+  controlsOverlay.addEventListener('keydown', (e)=>{
+    if (e.key !== 'Tab') return;
+    const focusables = controlsOverlay.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
+    const list = Array.from(focusables).filter(el => !el.hasAttribute('disabled'));
+    if (!list.length) return;
+    const first = list[0], last = list[list.length - 1];
+    if (e.shiftKey && document.activeElement === first){ e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last){ e.preventDefault(); first.focus(); }
+  });
+
+  'use strict';
+  (function(){
+    // ====== BASIC STATE ======
+    const canvas=document.getElementById('canvas');
+    const ctx=canvas.getContext('2d');
+    const DPR = Math.max(1, window.devicePixelRatio || 1);
+    let width=window.innerWidth, height=window.innerHeight;
+    function setupCanvas(){
+      width = window.innerWidth; height = window.innerHeight;
+      canvas.style.width = width+"px"; canvas.style.height = height+"px";
+      canvas.width = Math.floor(width * DPR); canvas.height = Math.floor(height * DPR);
+      ctx.setTransform(DPR,0,0,DPR,0,0);
+    }
+    setupCanvas();
+  let zoom=1.0, CELL_BASE=28, offsetX=-width/2, offsetY=-height/2;
+    let dragging=false, dragMoved=false, lastX=0, lastY=0, spaceDown=false;
+
+    const revealed=new Set(), flagged=new Set(), discovered=new Set(), safeMask=new Set();
+    let worldSeed=(Math.random()*1e9)>>>0;
+    const mineDensity=0.16;
+    const flagCounter=document.getElementById('flagCounter');
+    let gameOver=false, explodedAt=null;
+
+    // === Animation state ===
+    const REVEAL_MS = 180;
+    const REVEAL_WAVE_SPEED = 50; // ms per cell distance
+    const revealAt = new Map();
+    const revealOrigin = new Map(); // Track reveal wave origin points
+    
+    // Grid presentation
+    const GRID_LINE=1, CHUNK_SIZE=32, FOG_RADIUS=3, SHOW_CHUNK_GUIDES=true;
+
+  // ====== COLORS / UTIL ======
+  // Visual palette for cells: change these to tweak hidden vs revealed appearance
+  const HIDDEN_CELL_COLOR = '#121737'; // background for unrevealed tiles
+  const REVEALED_CELL_COLOR = '#4e5394'; // background for revealed tiles (open areas)
+
+  // ====== UTIL ======
+    const key=(x,y)=>x+','+y;
+    function hash01(x,y,s){let h=2166136261^s;h=(h^Math.imul(x,374761393))>>>0;h=Math.imul(h,2654435761)>>>0;h=(h^Math.imul(y,668265263))>>>0;h=Math.imul(h,2246822519)>>>0;h^=h>>>16;h=Math.imul(h,2246822519)>>>0;h^=h>>>13;h=Math.imul(h,3266489917)>>>0;h^=h>>>16;return(h>>>0)/4294967296;}
+    const isMineRaw=(x,y)=>hash01(x,y,worldSeed)<mineDensity;
+    const isMine=(x,y)=>safeMask.has(key(x,y))?false:isMineRaw(x,y);
+    function neighborCount(x,y){let n=0;for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++){if(dx||dy){if(isMine(x+dx,y+dy))n++;}}return n;}
+
+    const cellPx = () => Math.max(10, Math.round(CELL_BASE * zoom));
+    const screenToCell=(sx,sy)=>({x:Math.floor((sx+offsetX)/cellPx()),y:Math.floor((sy+offsetY)/cellPx())});
+    function visibleCellBounds(){const pad=2,px=cellPx();const tl=screenToCell(0-pad*px,0-pad*px);const br=screenToCell(width+pad*px,height+pad*px);return{x0:tl.x,y0:tl.y,x1:br.x,y1:br.y};}
+    function isNearDiscovered(x,y,r){for(let dy=-r;dy<=r;dy++)for(let dx=-r;dx<=r;dx++){if(discovered.has(key(x+dx,y+dy)))return true;}return false;}
+
+    // Render queue
+    const requestDraw=(()=>{let pending=false;return()=>{if(!pending){pending=true;requestAnimationFrame(()=>{pending=false;draw();});}}})();
+
+    // ====== GAME FLOW ======
+    function newRound(){
+      revealed.clear(); flagged.clear(); discovered.clear(); safeMask.clear();
+      revealAt.clear(); gameOver=false; explodedAt=null;
+      document.getElementById('overlay').style.display='none';
+      modeBadge.style.display = 'none';                
+      updateFlagCounter(); requestDraw();
+    }
+
+    function endGameAt(x,y){
+      gameOver=true; explodedAt={x,y};
+      document.getElementById('overlay').style.display='grid';
+      modeBadge.style.display = 'inline-block';        
+      const { x0,y0,x1,y1 } = visibleCellBounds();
+      for(let yy=y0; yy<=y1; yy++) for(let xx=x0; xx<=x1; xx++){
+        if(isMine(xx,yy)) markRevealKey(key(xx,yy));
+      }
+      requestDraw();
+    }
+
+    function updateFlagCounter(){flagCounter.textContent=flagged.size;}
+
+    // ====== INPUT ======
+    canvas.addEventListener('mousedown',e=>{if(e.button===1||spaceDown){dragging=true;dragMoved=false;lastX=e.clientX;lastY=e.clientY;}});
+    window.addEventListener('mousemove',e=>{if(dragging){const dx=e.clientX-lastX,dy=e.clientY-lastY;if(Math.abs(dx)>2||Math.abs(dy)>2)dragMoved=true;offsetX-=dx;offsetY-=dy;lastX=e.clientX;lastY=e.clientY;requestDraw();}});
+    window.addEventListener('mouseup',()=>{dragging=false;dragMoved=false;});
+    window.addEventListener('keydown',e=>{if(e.code==='Space'&&!spaceDown){spaceDown=true;document.body.classList.add('drag-mode');}});
+    window.addEventListener('keyup',e=>{if(e.code==='Space'){spaceDown=false;document.body.classList.remove('drag-mode');}});
+
+    canvas.addEventListener('wheel',e=>{e.preventDefault();const mx=e.clientX,my=e.clientY;const oldZoom=zoom;const zf=Math.pow(1.001,-e.deltaY);let nz=oldZoom*zf;nz=Math.min(2.5,Math.max(0.35,nz));const scale=nz/oldZoom;offsetX=(offsetX+mx)*scale-mx;offsetY=(offsetY+my)*scale-my;zoom=nz;requestDraw();},{passive:false});
+
+    canvas.addEventListener('contextmenu',e=>e.preventDefault());
+    canvas.addEventListener('mouseup',e=>{if(dragMoved)return;if(gameOver)return;const{ x,y}=screenToCell(e.clientX,e.clientY);const k=key(x,y);if(e.button===2){if(revealed.has(k))return;if(flagged.has(k))flagged.delete(k);else flagged.add(k);updateFlagCounter();requestDraw();}else if(e.button===0){if(revealed.has(k))chordReveal(x,y);else revealCell(x,y,true);}});
+
+    window.addEventListener('resize',()=>{ setupCanvas(); requestDraw(); });
+
+    // HUD
+    document.getElementById('newSeed').addEventListener('click',()=>{worldSeed=(Math.random()*1e9)>>>0;newRound();});
+    document.getElementById('resetView').addEventListener('click',()=>{offsetX=-width/2;offsetY=-height/2;zoom=1.0;requestDraw();});
+    document.getElementById('clearReveals').addEventListener('click',()=>{revealed.clear();flagged.clear();updateFlagCounter();requestDraw();});
+
+    const hud = document.getElementById('hud');
+    const modeBadge = document.createElement('span');
+    modeBadge.className = 'badge';
+    modeBadge.textContent = 'Spectating';
+    modeBadge.style.display = 'none';
+    hud.appendChild(modeBadge);
+
+
+    // Overlay
+    document.getElementById('overlayNewRound').addEventListener('click',()=>{worldSeed=(Math.random()*1e9)>>>0;newRound();});
+    document.getElementById('overlayCenter').addEventListener('click',()=>{offsetX=-width/2;offsetY=-height/2;requestDraw();});
+
+    // ====== REVEAL LOGIC ======
+    function markDiscovered(x,y){discovered.add(key(x,y));}
+    function markRevealKey(k, originX, originY) {
+        if (!revealed.has(k)) revealed.add(k);
+        if (!revealAt.has(k)) {
+            const [cellX, cellY] = k.split(',').map(Number);
+            const dist = originX !== undefined ? 
+                Math.sqrt(Math.pow(cellX - originX, 2) + Math.pow(cellY - originY, 2)) : 0;
+            revealAt.set(k, performance.now() + dist * REVEAL_WAVE_SPEED);
+            if (originX !== undefined) revealOrigin.set(k, {x: originX, y: originY});
+        }
+    }
+
+    function revealCell(x, y) {
+        const k = key(x,y);
+        if (flagged.has(k) || revealed.has(k)) return;
+        
+        if (revealed.size === 0) {
+            safeMask.add(k);
+            for (let dy=-1; dy<=1; dy++) {
+                for (let dx=-1; dx<=1; dx++) {
+                    if (dx || dy) safeMask.add(key(x+dx,y+dy));
+                }
+            }
+        }
+        
+        if (isMine(x,y)) {
+            markRevealKey(k, x, y);
+            markDiscovered(x,y);
+            endGameAt(x,y);
+            flashMine();
+            return;
+        }
+        
+        const n = neighborCount(x,y);
+        if (n === 0) floodZero(x, y, x, y);
+        else {
+            markRevealKey(k, x, y);
+            markDiscovered(x,y);
+        }
+        requestDraw();
+    }
+
+    function floodZero(x, y, originX, originY) {
+        const q = [[x,y]];
+        const seen = new Set();
+        while (q.length) {
+            const [cx,cy] = q.shift();
+            const kk = key(cx,cy);
+            if (seen.has(kk)) continue;
+            seen.add(kk);
+            if (isMine(cx,cy)) continue;
+            
+            markRevealKey(kk, originX, originY);
+            markDiscovered(cx,cy);
+            
+            const n = neighborCount(cx,cy);
+            if (n === 0) {
+                for (let dy=-1; dy<=1; dy++) {
+                    for (let dx=-1; dx<=1; dx++) {
+                        if (dx || dy) q.push([cx+dx,cy+dy]);
+                    }
+                }
+            }
+        }
+    }
+
+    function chordReveal(x,y){
+      const center=key(x,y); if(!revealed.has(center)) return; const n=neighborCount(x,y); if(n<=0) return;
+      let flags=0; const neigh=[];
+      for(let dy=-1; dy<=1; dy++) for(let dx=-1; dx<=1; dx++){
+        if(dx===0&&dy===0) continue; const nx=x+dx, ny=y+dy, nk=key(nx,ny);
+        if(flagged.has(nk)) flags++; neigh.push([nx,ny,nk]);
+      }
+      if(flags!==n) return;
+      for(const [nx,ny,nk] of neigh){
+        if(!revealed.has(nk)&&!flagged.has(nk)){
+          if(isMine(nx,ny)){
+            markRevealKey(nk); markDiscovered(nx,ny); endGameAt(nx,ny); flashMine();
+          } else {
+            revealCell(nx,ny);
+          }
+        }
+      }
+    }
+
+    function flashMine(){ const b=document.body; const bg=b.style.background; b.style.background='#2a0f14'; setTimeout(()=>{ b.style.background=bg; }, 90); }
+
+    // ====== RENDER ======
+    function draw(){
+      const now=performance.now(); let needsMore=false;
+      ctx.clearRect(0,0,width,height);
+      const px=cellPx();
+      const {x0,y0,x1,y1}=visibleCellBounds();
+      if (gameOver) {
+        for (let yy = y0; yy <= y1; yy++) {
+          for (let xx = x0; xx <= x1; xx++) {
+            if (isMine(xx, yy)) markRevealKey(key(xx, yy));
+          }
+        }
+      }
+
+      // Chunk guides at high zoom (HiDPI-safe)
+      if(SHOW_CHUNK_GUIDES && px>=24){
+        const alpha = Math.min(0.35, (px-24)/24);
+        if(alpha>0){
+          ctx.save();
+          ctx.globalAlpha = alpha;
+          ctx.strokeStyle='#1b2143';
+          ctx.lineWidth=1; // 1 CSS px; crisp with DPR transform
+          ctx.beginPath();
+          const c0x=Math.floor(x0/CHUNK_SIZE)*CHUNK_SIZE; const c0y=Math.floor(y0/CHUNK_SIZE)*CHUNK_SIZE;
+          for(let cx=c0x; cx<=x1; cx+=CHUNK_SIZE){ const sx=cx*px - offsetX; ctx.moveTo(Math.round(sx),0); ctx.lineTo(Math.round(sx),height); }
+          for(let cy=c0y; cy<=y1; cy+=CHUNK_SIZE){ const sy=cy*px - offsetY; ctx.moveTo(0,Math.round(sy)); ctx.lineTo(width,Math.round(sy)); }
+          ctx.stroke();
+          ctx.restore();
+        }
+      }
+
+      for(let y=y0; y<=y1; y++){
+        for(let x=x0; x<=x1; x++){
+          const sx=Math.floor(x*px - offsetX), sy=Math.floor(y*px - offsetY);
+          const k=key(x,y); const rev=revealed.has(k); const flg=flagged.has(k);
+          const nearFrontier = (rev || flg || isNearDiscovered(x,y,FOG_RADIUS));
+
+          // Cell background
+          ctx.fillStyle = rev ? REVEALED_CELL_COLOR : HIDDEN_CELL_COLOR;
+          ctx.fillRect(sx, sy, px, px);
+
+          // Fine grid only near frontier or for revealed/flagged
+          if(px>=12 && nearFrontier){ ctx.strokeStyle='rgba(255,255,255,0.06)'; ctx.lineWidth=GRID_LINE; ctx.strokeRect(sx, sy, px, px); }
+
+          if(rev){
+            // reveal animation progress
+            const t0 = revealAt.get(k) ?? now;
+            let p = Math.min(1, (now - t0) / REVEAL_MS);
+            if(p < 1) needsMore = true;
+            const ease = p * (2 - p); // easeOutQuad
+            const s = 0.85 + 0.15 * ease; // scale-in
+
+            if(isMine(x,y)){
+              ctx.save();
+              ctx.translate(sx+px/2, sy+px/2); ctx.scale(s, s); ctx.translate(-(sx+px/2), -(sy+px/2));
+              ctx.fillStyle='rgba(255,107,107,0.20)'; ctx.fillRect(sx,sy,px,px);
+              if(px>16){ ctx.beginPath(); ctx.arc(sx+px/2, sy+px/2, px*0.25, 0, Math.PI*2); ctx.fillStyle='#ff6b6b'; ctx.fill(); }
+              ctx.restore();
+              if(explodedAt && explodedAt.x===x && explodedAt.y===y){ ctx.strokeStyle='#ffffff'; ctx.lineWidth=2; ctx.strokeRect(sx+2,sy+2,px-4,px-4); }
+            } else {
+              const n=neighborCount(x,y);
+              if(n>0){
+                ctx.save();
+                ctx.translate(sx+px/2, sy+px/2); ctx.scale(s, s); ctx.translate(-(sx+px/2), -(sy+px/2));
+                ctx.globalAlpha = ease; // fade numbers in
+                ctx.font=`${Math.floor(px*0.5)}px ui-monospace, monospace`; ctx.textAlign='center'; ctx.textBaseline='middle';
+                const colorMap=['#aab2ff','#69e0b9','#ffd166','#ff9f1c','#ff6b6b','#ff4d6d','#d0a2ff','#ffffff'];
+                ctx.fillStyle=colorMap[(n-1)%colorMap.length];
+                ctx.fillText(String(n), sx+px/2, sy+px/2+1);
+                ctx.restore();
+                ctx.globalAlpha = 1;
+              }
+              // subtle highlight ring on reveal
+              if(p<1){ ctx.save(); ctx.strokeStyle='rgba(255,255,255,'+(0.15*(1-p))+')'; ctx.lineWidth=2; ctx.strokeRect(sx+1, sy+1, px-2, px-2); ctx.restore(); }
+            }
+          } else if(flg){
+            // Flag glyph
+            ctx.fillStyle='#ffaf38';
+            ctx.beginPath();
+            ctx.moveTo(sx+px*0.25, sy+px*0.2);
+            ctx.lineTo(sx+px*0.75, sy+px*0.38);
+            ctx.lineTo(sx+px*0.25, sy+px*0.55);
+            ctx.closePath();
+            ctx.fill();
+            ctx.fillRect(sx+px*0.25-1, sy+px*0.2, 2, px*0.6);
+          }
+        }
+      }
+
+      if(needsMore) requestDraw();
+    }
+
+    // ====== INIT ======
+    updateFlagCounter();
+    requestDraw();
+
+    // ====== SANITY TESTS (console only) ======
+    (function tests(){ try{
+      // hash01 range
+      for(let i=0;i<3;i++){ const v=hash01(i*12345,-i*6789,424242); if(!(v>=0&&v<1)) console.error('[TEST] hash01 range fail',v); }
+      // discovered add sanity
+      const before=new Set(discovered); const bc=discovered.size; discovered.add('1,1'); const diff1=discovered.size-bc; discovered.clear(); for(const k of before) discovered.add(k); if(diff1!==1) console.error('[TEST] discovered add fail');
+      // flag counter increments
+      flagged.add('t'); updateFlagCounter(); if(flagCounter.textContent!=='1') console.error('[TEST] flag counter fail'); flagged.delete('t'); updateFlagCounter();
+    }catch(e){ console.error('[TEST] runtime',e); } })();
+
+  })();
+  </script>
+</body>
+</html>
